@@ -90,9 +90,7 @@ version = "0.0.0"
             let mut map = Table::new();
 
             map.insert("dependencies".to_owned(), Value::Table(stage.dependencies));
-            if let Some(patch) = stage.patch {
-                map.insert("patch".to_owned(), Value::Table(patch));
-            }
+            map.insert("patch".to_owned(), Value::Table(stage.patch));
 
             stoml.push_str(&Value::Table(map).to_string());
         }
@@ -293,7 +291,7 @@ pub fn update(
 pub struct Stage {
     crates: Vec<String>,
     dependencies: Table,
-    patch: Option<Table>,
+    patch: Table,
 }
 
 /// A sysroot that will be built in "stages"
@@ -310,6 +308,33 @@ impl Blueprint {
     }
 
     fn from(toml: Option<&xargo::Toml>, target: &str, root: &Root, src: &Src) -> Result<Self> {
+        let mut patch = match toml.and_then(xargo::Toml::patch) {
+            Some(value) => value
+                .as_table()
+                .cloned()
+                .ok_or_else(|| format!("Xargo.toml: `patch` must be a table"))?,
+            None => Table::new()
+        };
+
+        let rustc_std_workspace_core = src.path().join("tools/rustc-std-workspace-core");
+        if rustc_std_workspace_core.exists() {
+            // add rustc_std_workspace_core to patch section (if not specified)
+            fn table_entry<'a>(table: &'a mut Table, key: &str) -> Result<&'a mut Table> {
+                match table.entry(key.into()).or_insert_with(|| Value::Table(Table::new())) {
+                    Value::Table(table) => Ok(table),
+                    _ => Err(format!("Xargo.toml: `{}` must be a table", key).into())
+                }
+            }
+
+            let mut crates_io = table_entry(&mut patch, "crates-io")?;
+            if !crates_io.contains_key("rustc-std-workspace-core") {
+                table_entry(&mut crates_io, "rustc-std-workspace-core")?
+                    .insert("path".into(), Value::String(
+                                rustc_std_workspace_core.display().to_string()
+                            ));
+            }
+        }
+
         let deps = match (
             toml.and_then(|t| t.dependencies()),
             toml.and_then(|t| t.target_dependencies(target)),
@@ -405,7 +430,7 @@ impl Blueprint {
                     }
                 }
 
-                blueprint.push(stage, k, map, src);
+                blueprint.push(stage, k, map, &patch);
             } else {
                 Err(format!(
                     "Xargo.toml: target.{}.dependencies.{} must be \
@@ -418,31 +443,11 @@ impl Blueprint {
         Ok(blueprint)
     }
 
-    fn push(&mut self, stage: i64, krate: String, toml: Table, src: &Src) {
+    fn push(&mut self, stage: i64, krate: String, toml: Table, patch: &Table) {
         let stage = self.stages.entry(stage).or_insert_with(|| Stage {
             crates: vec![],
             dependencies: Table::new(),
-            patch: {
-                let rustc_std_workspace_core = src.path().join("tools/rustc-std-workspace-core");
-                if rustc_std_workspace_core.exists() {
-                    // For a new stage, we also need to compute the patch section of the toml
-                    fn make_singleton_map(key: &str, val: Value) -> Table {
-                        let mut map = Table::new();
-                        map.insert(key.to_owned(), val);
-                        map
-                    }
-                    Some(make_singleton_map("crates-io", Value::Table(
-                        make_singleton_map("rustc-std-workspace-core", Value::Table(
-                            make_singleton_map("path", Value::String(
-                                rustc_std_workspace_core.display().to_string()
-                            ))
-                        ))
-                    )))
-                } else {
-                    // an old rustc, doesn't need a rustc_std_workspace_core
-                    None
-                }
-            }
+            patch: patch.clone(),
         });
 
         stage.dependencies.insert(krate.clone(), Value::Table(toml));
