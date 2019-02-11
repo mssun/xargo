@@ -395,6 +395,30 @@ impl Blueprint {
             }
         };
 
+        for (_k, v) in &mut patch {
+            if let Value::Table(ref mut patch_map) = v {
+                for (kk, vv) in patch_map {
+                    if let Value::Table(ref mut deps_map) = vv {
+                        if let Some(path) = deps_map.get_mut("path") {
+                            let p = PathBuf::from(path.as_str()
+                                                  .ok_or_else(|| format!("dependencies.{}.path must be a string", kk))?);
+
+                            if !p.is_absolute() {
+                                *path = Value::String(
+                                    root.path()
+                                        .join(&p)
+                                        .canonicalize()
+                                        .chain_err(|| format!("couldn't canonicalize {}", p.display()))?
+                                        .display()
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut blueprint = Blueprint::new();
         for (k, v) in deps {
             if let Value::Table(mut map) = v {
